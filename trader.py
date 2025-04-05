@@ -76,7 +76,8 @@ class ResinStrategy(Strategy):
 
 #volatile
 class KelpStrategy(Strategy):
-    def __init__(self, symbol: str, T: int = 20000, gamma: float = 0.1, kappa: float = 0.1, sigma_window: int = 30):
+    def __init__(self, symbol: str, limit: int, T: int = 20000, gamma: float = 0.01, kappa: float = 0.05, sigma_window: int = 30) -> None:
+        super().__init__(symbol, limit)
         self.symbol = symbol
         self.T = T
         self.gamma = gamma
@@ -86,6 +87,7 @@ class KelpStrategy(Strategy):
         self.inventory = 0
         self.cash = 0
         self.tick = 0
+
 
     def compute_sigma(self):
         if len(self.prices) < 2:
@@ -118,14 +120,18 @@ class KelpStrategy(Strategy):
         q_bid = rp_t - spread / 2
         q_ask = rp_t + spread / 2
 
-        # Optional: round to nearest int
         q_bid = round(q_bid)
         q_ask = round(q_ask)
 
-        # Place orders with default quantity (adjust as needed)
+
+        potential_buy = self.limit - position
+        potential_sell = self.limit + position
+
+
+
         orders = [
-            Order(self.symbol, q_bid, 1),   # Buy 1
-            Order(self.symbol, q_ask, -1),  # Sell 1
+            Order(self.symbol, q_bid, min(potential_buy, 20)),   
+            Order(self.symbol, q_ask, -min(potential_sell, 20)),  
         ]
 
         return orders
