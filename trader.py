@@ -41,7 +41,7 @@ class ResinStrategy(Strategy):
         potential_sell = self.limit + position
 
         max_buy_price = true_value - 1 if position > 0.5 * self.limit else true_value
-        min_sell_price = true_value + 1 if position < -0.5 * self.limit else true_value
+        min_sell_price = true_value + 1 if position < -0.3 * self.limit else true_value
 
         # BUY 
         for price, volume in sell_orders:
@@ -76,7 +76,7 @@ class ResinStrategy(Strategy):
 
 #volatile
 class KelpStrategy(Strategy):
-    def __init__(self, symbol: str, limit: int, T: int = 20000, gamma: float = 0.01, kappa: float = 0.05, sigma_window: int = 30) -> None:
+    def __init__(self, symbol: str, limit: int, T: int = 20000, gamma: float = 0.002, kappa: float = 0.2, sigma_window: int = 10) -> None:
         super().__init__(symbol, limit)
         self.symbol = symbol
         self.T = T
@@ -127,7 +127,7 @@ class KelpStrategy(Strategy):
         potential_buy = self.limit - position
         potential_sell = self.limit + position
 
-
+        print(f"[KELP] Tick {self.tick}: bid={q_bid}, ask={q_ask}, best_bid={best_bid}, best_ask={best_ask}")
 
         orders = [
             Order(self.symbol, q_bid, min(potential_buy, 20)),   
