@@ -120,9 +120,12 @@ class ResinStrategy(MarketMakingStrategy):
 class KelpStrategy(MarketMakingStrategy):
     def get_true_value(self, state: TradingState) -> int:
         order_depth = state.order_depths[self.symbol]
-        best_bid = max(order_depth.buy_orders.keys())
-        best_ask = min(order_depth.sell_orders.keys())
-        return round((best_bid + best_ask) / 2)
+        bids = order_depth.buy_orders
+        asks = order_depth.sell_orders
+        top_bid_price, top_bid_vol = max(bids.items())
+        top_ask_price, top_ask_vol = min(asks.items())
+        return round((top_bid_price * top_ask_vol + top_ask_price * top_bid_vol) / (top_bid_vol + top_ask_vol))
+
 
 class Trader:
     
