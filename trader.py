@@ -1,99 +1,134 @@
-from datamodel import OrderDepth, UserId, TradingState, Order
+from collections import deque
+from datamodel import Order, TradingState
 from typing import List
-import string
 
-# CLASS HIERARCHY
-# Strategy (base)
-# └── MarketMakingStrategy (whatever window, liquidity logic we want)
-#     ├── ResinStrategy (stable value of 10k)
-#     └── KelpStrategy (market midpoint and momentum calculation)
-
-#shared inheirited methods
 class Strategy:
     def __init__(self, symbol: str, limit: int) -> None:
         self.symbol = symbol
         self.limit = limit
 
-    def run(self, state: TradingState) -> List[Order]:
-        pass
+    def run(self, state: TradingState) -> list[Order]:
+        self.orders = []
+        return self.act(state)
 
-    def load(self, data) -> None:
-        pass
+    def buy(self, price: int, quantity: int) -> None:
+        self.orders.append(Order(self.symbol, int(price), quantity))
 
-    def save(self):
-        return None
-    
-#stable
-class ResinStrategy(Strategy):
+    def sell(self, price: int, quantity: int) -> None:
+        self.orders.append(Order(self.symbol, int(price), -quantity))
+
+
+
+class MarketMakingStrategy(Strategy):
     def __init__(self, symbol: str, limit: int) -> None:
         super().__init__(symbol, limit)
-        self.prices = []
-    
-    def run(self, state: TradingState) -> List[Order]:
-        result = []
-        order_depth: OrderDepth = state.order_depths[self.symbol]
-        position = state.position.get(self.symbol, 0)
+        self.window = deque()
+        self.window_size = 10
 
-        # Calculate best bid/ask and mid price
+    def act(self, state: TradingState) -> list[Order]:
+        order_depth = state.order_depths[self.symbol]
         if not order_depth.buy_orders or not order_depth.sell_orders:
-            return result
+            return []
 
+        true_value = self.get_true_value(state)
+
+        buy_orders = sorted(order_depth.buy_orders.items(), reverse=True)
+        sell_orders = sorted(order_depth.sell_orders.items())
+
+        position = state.position.get(self.symbol, 0)
+        potential_buy = self.limit - position
+        potential_sell = self.limit + position
+
+        self.window.append(abs(position) == self.limit)
+        if len(self.window) > self.window_size:
+            self.window.popleft()
+
+        max_buy_price = true_value - 1 if position > self.limit * 0.5 else true_value
+        min_sell_price = true_value + 1 if position < self.limit * -0.5 else true_value
+
+
+        soft_liquidate = (
+            len(self.window) == self.window_size and
+            sum(self.window) >= self.window_size / 2 and
+            self.window[-1]
+        )
+        hard_liquidate = (
+            len(self.window) == self.window_size and
+            all(self.window)
+        )
+
+
+
+
+        # buy logic
+        for price, volume in sell_orders:
+            if potential_buy > 0 and price <= max_buy_price:
+                quantity = min(potential_buy, volume)
+                self.buy(price, quantity)
+                potential_buy -= quantity
+
+     
+        # liquidate buy if we're doing nothing
+        if potential_buy > 0 and hard_liquidate:
+            self.buy(true_value, potential_buy // 2)
+            potential_buy -= potential_buy // 2
+
+        if potential_buy > 0 and soft_liquidate:
+            self.buy(true_value - 2, potential_buy // 2)
+            potential_buy -= potential_buy // 2
+
+        if potential_buy > 0:
+            popular_buy_price = max(buy_orders, key=lambda tup: tup[1])[0]
+            price = min(max_buy_price, popular_buy_price + 1)
+            self.buy(price, potential_buy)
+
+
+        # sell logic
+        for price, volume in buy_orders:
+            if potential_sell > 0 and price >= min_sell_price:
+                quantity = min(potential_sell, volume)
+                self.sell(price, quantity)
+                potential_sell -= quantity
+
+        # liquidate sell if we've been doing nothing
+        if potential_sell > 0 and hard_liquidate:
+            self.sell(true_value, potential_sell // 2)
+            potential_sell -= potential_sell // 2
+
+        if potential_sell > 0 and soft_liquidate:
+            self.sell(true_value + 2, potential_sell // 2)
+            potential_sell -= potential_sell // 2
+        
+        if potential_sell > 0:
+            popular_sell_price = min(sell_orders, key=lambda tup: tup[1])[0]
+            price = max(min_sell_price, popular_sell_price - 1)
+            self.sell(price, potential_sell)
+
+
+        return self.orders
+
+
+class ResinStrategy(MarketMakingStrategy):
+    def get_true_value(self, state: TradingState) -> int:
+        order_depth = state.order_depths[self.symbol]
         best_bid = max(order_depth.buy_orders.keys())
         best_ask = min(order_depth.sell_orders.keys())
-        mid_price = (best_bid + best_ask) / 2
-        self.prices.append(mid_price)
+        return round((best_bid + best_ask) / 2)
 
-        mean_price = sum(self.prices) / len(self.prices)
-        buy_threshold = mean_price - 1.5
-        sell_threshold = mean_price + 1
-
-        # --- BUY if price is low ---
-        for ask_price, ask_volume in sorted(order_depth.sell_orders.items()):
-            if ask_price <= buy_threshold:
-                volume_to_buy = min(ask_volume, self.limit - position)
-                if volume_to_buy > 0:
-                    result.append(Order(self.symbol, ask_price, volume_to_buy))
-                    position += volume_to_buy
-                    break
-
-        # --- Fallback buy if stuck and we’re under-positioned ---
-            elif position < 0 and ask_price <= mean_price:
-                fallback_volume = min(ask_volume, self.limit - position, 1)  # buy back 1 unit
-                result.append(Order(self.symbol, ask_price, fallback_volume))
-                position += fallback_volume
-                break
-
-        # --- SELL if price is high ---
-        for bid_price, bid_volume in sorted(order_depth.buy_orders.items(), reverse=True):
-            if bid_price >= sell_threshold:
-                volume_to_sell = min(bid_volume, self.limit + position)
-                if volume_to_sell > 0:
-                    result.append(Order(self.symbol, bid_price, -volume_to_sell))
-                    position -= volume_to_sell
-                    break
-
-        # --- Fallback sell if stuck and we’re over-positioned ---
-            elif position > 0 and bid_price >= mean_price:
-                fallback_volume = min(bid_volume, self.limit + position, 1)  # sell 1 unit
-                result.append(Order(self.symbol, bid_price, -fallback_volume))
-                position -= fallback_volume
-                break
-
-        return result
 
 #volatile
-class KelpStrategy(Strategy):
-    def __init__(self, symbol: str, limit: int) -> None:
-        super().__init__(symbol, limit)
-    
-    def run(self, state: TradingState) -> List[Order]:
-        return []  # Placeholder for now
+class KelpStrategy(MarketMakingStrategy):
+    def get_true_value(self, state: TradingState) -> int:
+        order_depth = state.order_depths[self.symbol]
+        best_bid = max(order_depth.buy_orders.keys())
+        best_ask = min(order_depth.sell_orders.keys())
+        return round((best_bid + best_ask) / 2)
 
 class Trader:
     
     def __init__(self) -> None:
     
-      # rr is stable while kelp 
+      # rr is stable while kelp is volatile
       self.limits = { 
           "RAINFOREST_RESIN" : 50,
           "KELP" : 50,  
@@ -115,7 +150,7 @@ class Trader:
     def run(self, state: TradingState):
         
         
-
+        print(f"[TRADER] Positions: {state.position}")
         result = {}
         # NO CONVERSIONS FIRST ROUND
         CONVERSIONS = 0
@@ -127,6 +162,8 @@ class Trader:
                 result[symbol] = orders
 
         return result, CONVERSIONS, traderData
+
+  
 
 
 
