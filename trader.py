@@ -1,6 +1,7 @@
 from collections import deque
 from datamodel import Order, TradingState
 from typing import List
+import numpy as np
 
 class Strategy:
     def __init__(self, symbol: str, limit: int) -> None:
@@ -23,16 +24,7 @@ class ResinStrategy(Strategy):
         super().__init__(symbol, limit)
 
     def get_true_value(self, state: TradingState) -> int:
-        order_depth = state.order_depths[self.symbol]
-        buy_orders = order_depth.buy_orders
-        sell_orders = order_depth.sell_orders
-
-        if not buy_orders or not sell_orders:
-            return 10000  # Fallback value
-
-        best_bid = max(buy_orders.keys())
-        best_ask = min(sell_orders.keys())
-        return round((best_bid + best_ask) / 2)
+       return 10000
 
     def act(self, state: TradingState) -> list[Order]:
         order_depth = state.order_depths[self.symbol]
@@ -48,12 +40,10 @@ class ResinStrategy(Strategy):
         potential_buy = self.limit - position
         potential_sell = self.limit + position
 
-
         max_buy_price = true_value - 1 if position > 0.5 * self.limit else true_value
         min_sell_price = true_value + 1 if position < -0.5 * self.limit else true_value
 
-
-        # BUY logic (walk sell orders)
+        # BUY 
         for price, volume in sell_orders:
             if potential_buy > 0 and price <= max_buy_price:
                 quantity = min(potential_buy, volume)
@@ -61,20 +51,21 @@ class ResinStrategy(Strategy):
                 potential_buy -= quantity
 
 
-
-        if potential_buy > 0:
-            popular_buy_price = max(buy_orders, key=lambda tup: tup[1])[0]
-            price = min(max_buy_price, popular_buy_price + 1)
-            self.buy(price, potential_buy)
-
-        # SELL logic (walk buy orders)
+        # SELL 
         for price, volume in buy_orders:
             if potential_sell > 0 and price >= min_sell_price:
                 quantity = min(potential_sell, volume)
                 self.sell(price, quantity)
                 potential_sell -= quantity
 
+        # fall back buy
+        if potential_buy > 0:
+            popular_buy_price = max(buy_orders, key=lambda tup: tup[1])[0]
+            price = min(max_buy_price, popular_buy_price + 1)
+            self.buy(price, potential_buy)
 
+
+        # fall back sell
         if potential_sell > 0:
             popular_sell_price = min(sell_orders, key=lambda tup: tup[1])[0]
             price = max(min_sell_price, popular_sell_price - 1)
@@ -85,15 +76,59 @@ class ResinStrategy(Strategy):
 
 #volatile
 class KelpStrategy(Strategy):
-    def get_true_value(self, state: TradingState) -> int:
-        order_depth = state.order_depths[self.symbol]
-        best_bid = max(order_depth.buy_orders.keys())
-        best_ask = min(order_depth.sell_orders.keys())
-        return round((best_bid + best_ask) / 2)
-    
-    def act(self, state: TradingState) -> list[Order]:
-        return []
+    def __init__(self, symbol: str, T: int = 20000, gamma: float = 0.1, kappa: float = 0.1, sigma_window: int = 30):
+        self.symbol = symbol
+        self.T = T
+        self.gamma = gamma
+        self.kappa = kappa
+        self.sigma_window = sigma_window
+        self.prices = deque(maxlen=sigma_window)
+        self.inventory = 0
+        self.cash = 0
+        self.tick = 0
 
+    def compute_sigma(self):
+        if len(self.prices) < 2:
+            return 0.1  # minimum volatility
+        return np.std(np.diff(np.array(self.prices)))
+
+    def act(self, state: TradingState) -> list[Order]:
+        self.tick += 1
+
+        order_depth = state.order_depths[self.symbol]
+        position = state.position.get(self.symbol, 0)
+        self.inventory = position  # sync with live position
+
+        best_bid = max(order_depth.buy_orders.keys(), default=None)
+        best_ask = min(order_depth.sell_orders.keys(), default=None)
+
+        if best_bid is None or best_ask is None:
+            return []
+
+        mid_price = (best_bid + best_ask) / 2
+        self.prices.append(mid_price)
+
+        sigma_t = self.compute_sigma()
+        time_rem = self.T - self.tick
+
+        # Reservation price & optimal spread
+        rp_t = mid_price - self.gamma * (sigma_t**2) * time_rem * self.inventory
+        spread = self.gamma * sigma_t**2 * time_rem + (2 / self.gamma) * np.log(1 + self.gamma / self.kappa)
+
+        q_bid = rp_t - spread / 2
+        q_ask = rp_t + spread / 2
+
+        # Optional: round to nearest int
+        q_bid = round(q_bid)
+        q_ask = round(q_ask)
+
+        # Place orders with default quantity (adjust as needed)
+        orders = [
+            Order(self.symbol, q_bid, 1),   # Buy 1
+            Order(self.symbol, q_ask, -1),  # Sell 1
+        ]
+
+        return orders
 
 class Trader:
     
