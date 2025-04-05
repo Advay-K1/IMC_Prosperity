@@ -21,8 +21,6 @@ class Strategy:
 class ResinStrategy(Strategy):
     def __init__(self, symbol: str, limit: int) -> None:
         super().__init__(symbol, limit)
-        self.window = deque()
-        self.window_size = 10
 
     def get_true_value(self, state: TradingState) -> int:
         order_depth = state.order_depths[self.symbol]
@@ -50,22 +48,10 @@ class ResinStrategy(Strategy):
         potential_buy = self.limit - position
         potential_sell = self.limit + position
 
-        self.window.append(abs(position) == self.limit)
-        if len(self.window) > self.window_size:
-            self.window.popleft()
 
         max_buy_price = true_value - 1 if position > 0.5 * self.limit else true_value
         min_sell_price = true_value + 1 if position < -0.5 * self.limit else true_value
 
-        soft_liquidate = (
-            len(self.window) == self.window_size and
-            sum(self.window) >= self.window_size / 2 and
-            self.window[-1]
-        )
-        hard_liquidate = (
-            len(self.window) == self.window_size and
-            all(self.window)
-        )
 
         # BUY logic (walk sell orders)
         for price, volume in sell_orders:
@@ -74,13 +60,7 @@ class ResinStrategy(Strategy):
                 self.buy(price, quantity)
                 potential_buy -= quantity
 
-        if potential_buy > 0 and hard_liquidate:
-            self.buy(true_value, potential_buy // 2)
-            potential_buy -= potential_buy // 2
 
-        if potential_buy > 0 and soft_liquidate:
-            self.buy(true_value - 2, potential_buy // 2)
-            potential_buy -= potential_buy // 2
 
         if potential_buy > 0:
             popular_buy_price = max(buy_orders, key=lambda tup: tup[1])[0]
@@ -94,13 +74,6 @@ class ResinStrategy(Strategy):
                 self.sell(price, quantity)
                 potential_sell -= quantity
 
-        if potential_sell > 0 and hard_liquidate:
-            self.sell(true_value, potential_sell // 2)
-            potential_sell -= potential_sell // 2
-
-        if potential_sell > 0 and soft_liquidate:
-            self.sell(true_value + 2, potential_sell // 2)
-            potential_sell -= potential_sell // 2
 
         if potential_sell > 0:
             popular_sell_price = min(sell_orders, key=lambda tup: tup[1])[0]
