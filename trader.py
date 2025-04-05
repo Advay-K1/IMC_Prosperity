@@ -18,12 +18,23 @@ class Strategy:
         self.orders.append(Order(self.symbol, int(price), -quantity))
 
 
-
-class MarketMakingStrategy(Strategy):
+class ResinStrategy(Strategy):
     def __init__(self, symbol: str, limit: int) -> None:
         super().__init__(symbol, limit)
         self.window = deque()
         self.window_size = 10
+
+    def get_true_value(self, state: TradingState) -> int:
+        order_depth = state.order_depths[self.symbol]
+        buy_orders = order_depth.buy_orders
+        sell_orders = order_depth.sell_orders
+
+        if not buy_orders or not sell_orders:
+            return 10000  # Fallback value
+
+        best_bid = max(buy_orders.keys())
+        best_ask = min(sell_orders.keys())
+        return round((best_bid + best_ask) / 2)
 
     def act(self, state: TradingState) -> list[Order]:
         order_depth = state.order_depths[self.symbol]
@@ -43,9 +54,8 @@ class MarketMakingStrategy(Strategy):
         if len(self.window) > self.window_size:
             self.window.popleft()
 
-        max_buy_price = true_value - 1 if position > self.limit * 0.5 else true_value
-        min_sell_price = true_value + 1 if position < self.limit * -0.5 else true_value
-
+        max_buy_price = true_value - 1 if position > 0.5 * self.limit else true_value
+        min_sell_price = true_value + 1 if position < -0.5 * self.limit else true_value
 
         soft_liquidate = (
             len(self.window) == self.window_size and
@@ -57,18 +67,13 @@ class MarketMakingStrategy(Strategy):
             all(self.window)
         )
 
-
-
-
-        # buy logic
+        # BUY logic (walk sell orders)
         for price, volume in sell_orders:
             if potential_buy > 0 and price <= max_buy_price:
                 quantity = min(potential_buy, volume)
                 self.buy(price, quantity)
                 potential_buy -= quantity
 
-     
-        # liquidate buy if we're doing nothing
         if potential_buy > 0 and hard_liquidate:
             self.buy(true_value, potential_buy // 2)
             potential_buy -= potential_buy // 2
@@ -82,15 +87,13 @@ class MarketMakingStrategy(Strategy):
             price = min(max_buy_price, popular_buy_price + 1)
             self.buy(price, potential_buy)
 
-
-        # sell logic
+        # SELL logic (walk buy orders)
         for price, volume in buy_orders:
             if potential_sell > 0 and price >= min_sell_price:
                 quantity = min(potential_sell, volume)
                 self.sell(price, quantity)
                 potential_sell -= quantity
 
-        # liquidate sell if we've been doing nothing
         if potential_sell > 0 and hard_liquidate:
             self.sell(true_value, potential_sell // 2)
             potential_sell -= potential_sell // 2
@@ -98,33 +101,25 @@ class MarketMakingStrategy(Strategy):
         if potential_sell > 0 and soft_liquidate:
             self.sell(true_value + 2, potential_sell // 2)
             potential_sell -= potential_sell // 2
-        
+
         if potential_sell > 0:
             popular_sell_price = min(sell_orders, key=lambda tup: tup[1])[0]
             price = max(min_sell_price, popular_sell_price - 1)
             self.sell(price, potential_sell)
 
-
         return self.orders
 
 
-class ResinStrategy(MarketMakingStrategy):
+#volatile
+class KelpStrategy(Strategy):
     def get_true_value(self, state: TradingState) -> int:
         order_depth = state.order_depths[self.symbol]
         best_bid = max(order_depth.buy_orders.keys())
         best_ask = min(order_depth.sell_orders.keys())
         return round((best_bid + best_ask) / 2)
-
-
-#volatile
-class KelpStrategy(MarketMakingStrategy):
-    def get_true_value(self, state: TradingState) -> int:
-        order_depth = state.order_depths[self.symbol]
-        bids = order_depth.buy_orders
-        asks = order_depth.sell_orders
-        top_bid_price, top_bid_vol = max(bids.items())
-        top_ask_price, top_ask_vol = min(asks.items())
-        return round((top_bid_price * top_ask_vol + top_ask_price * top_bid_vol) / (top_bid_vol + top_ask_vol))
+    
+    def act(self, state: TradingState) -> list[Order]:
+        return []
 
 
 class Trader:
