@@ -41,7 +41,7 @@ class ResinStrategy(Strategy):
         potential_sell = self.limit + position
 
         max_buy_price = true_value - 1 if position > 0.5 * self.limit else true_value
-        min_sell_price = true_value + 1 if position < -0.3 * self.limit else true_value
+        min_sell_price = true_value + 1 if position < -0.5 * self.limit else true_value
 
         # BUY 
         for price, volume in sell_orders:
@@ -62,21 +62,24 @@ class ResinStrategy(Strategy):
         if potential_buy > 0:
             popular_buy_price = max(buy_orders, key=lambda tup: tup[1])[0]
             price = min(max_buy_price, popular_buy_price + 1)
-            self.buy(price, potential_buy)
-
+            quantity = min(potential_buy, self.limit - position)
+            if quantity > 0:
+                self.buy(price, quantity)
 
         # fall back sell
         if potential_sell > 0:
             popular_sell_price = min(sell_orders, key=lambda tup: tup[1])[0]
             price = max(min_sell_price, popular_sell_price - 1)
-            self.sell(price, potential_sell)
+            quantity = min(potential_sell, self.limit + position)
+            if quantity > 0:
+                self.sell(price, quantity)
 
         return self.orders
 
 
 #volatile
 class KelpStrategy(Strategy):
-    def __init__(self, symbol: str, limit: int, T: int = 20000, gamma: float = 0.0001, kappa: float = 0.335, sigma_window: int = 10) -> None:
+    def __init__(self, symbol: str, limit: int, T: int = 20000, gamma: float = 0.0001, kappa: float = 0.345, sigma_window: int = 4) -> None:
         super().__init__(symbol, limit)
         self.symbol = symbol
         self.T = T
@@ -95,7 +98,7 @@ class KelpStrategy(Strategy):
         return np.std(np.diff(np.array(self.prices)))
 
     def act(self, state: TradingState) -> list[Order]:
-        self.tick += 1
+        self.tick += 100
 
         order_depth = state.order_depths[self.symbol]
         position = state.position.get(self.symbol, 0)
@@ -127,12 +130,19 @@ class KelpStrategy(Strategy):
         potential_buy = self.limit - position
         potential_sell = self.limit + position
 
-        print(f"[KELP] Tick {self.tick}: bid={q_bid}, ask={q_ask}, best_bid={best_bid}, best_ask={best_ask}")
-
         orders = [
-            Order(self.symbol, q_bid, min(potential_buy, 20)),   
-            Order(self.symbol, q_ask, -min(potential_sell, 20)),  
+            Order(self.symbol, q_bid, max(0,min(potential_buy, 5))),   
+            Order(self.symbol, q_ask, max(0,-min(potential_sell, 5))),  
         ]
+
+        buy_qty = max(0, min(potential_buy - 2, 10))
+        sell_qty = max(0, -min(potential_sell + 2, 10))
+
+        print(
+        f"[KELP] Tick {self.tick} | σ²={sigma_t**2:.5f} | time_rem={time_rem} | inv={self.inventory}\n"
+        f"  mid={mid_price:.2f} | rp={rp_t:.2f} | spread={spread:.2f}\n"
+        f"  → q_bid={q_bid} ({buy_qty}), q_ask={q_ask} ({sell_qty}) | best_bid={best_bid}, best_ask={best_ask}"
+        )
 
         return orders
 
