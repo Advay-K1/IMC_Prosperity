@@ -76,7 +76,7 @@ class ResinStrategy(Strategy):
 
 #volatile
 class KelpStrategy(Strategy):
-    def __init__(self, symbol: str, limit: int, T: int = 20000, gamma: float = 0.002, kappa: float = 0.2, sigma_window: int = 10) -> None:
+    def __init__(self, symbol: str, limit: int, T: int = 20000, gamma: float = 0.0001, kappa: float = 0.335, sigma_window: int = 10) -> None:
         super().__init__(symbol, limit)
         self.symbol = symbol
         self.T = T
