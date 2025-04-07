@@ -1,9 +1,17 @@
 from collections import deque
-from datamodel import Order, TradingState
-from typing import List
+from datamodel import Listing, Observation, Order, OrderDepth, ProsperityEncoder, Symbol, Trade, TradingState
+from typing import Any
 import numpy as np
 import jsonpickle
+import json
 import math
+
+
+
+
+
+
+
 
 
 
@@ -192,21 +200,62 @@ class KelpStrategy(Strategy):
 #volatile with only 1-2 active participants
 class SquidInkStrategy(Strategy):
     def __init__(self, symbol: str, limit: int) -> None:
-        super().__init__(symbol, limit)
+        self.symbol = symbol
+        self.limit = limit
+        self.tick = 0
+        self.segment_interval = 100
+        self.last_segment_mid = None
+        self.last_decision_tick = 0
 
     def act(self, state: TradingState):
+        self.tick += 1
         order_depth = state.order_depths[self.symbol]
         position = state.position.get(self.symbol, 0)
-        orders = []
-
+        if not order_depth.buy_orders or not order_depth.sell_orders:
+            return []
         best_bid = max(order_depth.buy_orders.keys())
         best_ask = min(order_depth.sell_orders.keys())
-        fair_value = (best_bid + best_ask) / 2
+        mid_price = (best_bid + best_ask) / 2
 
-        buy_volume = 0
-        sell_volume = 0
+        ## manually set for start 
+        if self.tick == 1:
+            self.last_segment_mid = mid_price
 
-        return []
+        decision_time = False
+        if self.tick - self.last_decision_tick >= self.segment_interval:
+            decision_time = True
+            self.last_decision_tick = self.tick
+        decision = None
+        if decision_time:
+            delta = self.last_segment_mid - mid_price
+            if delta > 10:
+                decision = "buy"
+            elif delta < -10:
+                decision = "sell"
+            else:
+                decision = "hold"
+            self.last_segment_mid = mid_price
+
+        orders = []
+
+        if decision == "buy":
+            quantity = min(-order_depth.sell_orders[best_ask], self.limit - position)
+            if quantity > 0:
+                orders.append(Order(self.symbol, best_ask, quantity))  
+        elif decision == "sell":
+            quantity = min(order_depth.buy_orders[best_bid], self.limit + position)
+            if quantity > 0:
+                orders.append(Order(self.symbol, best_bid, -quantity))  
+        elif decision == "hold":
+            # maybe market make
+            bid_price = best_bid + 1
+            ask_price = best_ask - 1
+            qty = 20
+            if position < self.limit:
+                orders.append(Order(self.symbol, bid_price, qty))
+            if position > -self.limit:
+                orders.append(Order(self.symbol, ask_price, -qty))
+        return orders
     
 
 
@@ -238,7 +287,7 @@ class Trader:
     
     def run(self, state: TradingState):
 
-        print(f"[TRADER] Positions: {state.position}")
+        print(f"{state.position}")
         
         result = {}
         # NO CONVERSIONS FIRST ROUND
@@ -249,6 +298,7 @@ class Trader:
             if symbol in state.order_depths:
                 orders = strategy.run(state)
                 result[symbol] = orders
+
         return result, CONVERSIONS, traderData
 
   
