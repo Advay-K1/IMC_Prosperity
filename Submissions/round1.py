@@ -2,8 +2,12 @@ from collections import deque
 from datamodel import Order, TradingState
 from typing import List
 import numpy as np
+import jsonpickle
 import math
 
+
+
+# inherited common methods
 class Strategy:
     def __init__(self, symbol: str, limit: int) -> None:
         self.symbol = symbol
@@ -20,6 +24,11 @@ class Strategy:
         self.orders.append(Order(self.symbol, int(price), -quantity))
 
 
+
+
+
+
+#stable
 class ResinStrategy(Strategy):
     def __init__(self, symbol: str, limit: int) -> None:
         super().__init__(symbol, limit)
@@ -90,6 +99,9 @@ class ResinStrategy(Strategy):
         return self.orders
 
 
+
+
+
 #volatile
 class KelpStrategy(Strategy):
     def __init__(self, symbol: str, limit: int) -> None:
@@ -97,8 +109,8 @@ class KelpStrategy(Strategy):
         self.take_width = 1
         self.edge_width = 2
         self.tick = 0
-        self.mid_prices = deque(maxlen=20)
-        self.ticks = deque(maxlen=20)
+        self.mid_prices = deque(maxlen=30)
+        self.ticks = deque(maxlen=30)
 
     def simple_linear_regression(self, xs, ys, next_x):
         X = np.array(xs)
@@ -130,7 +142,14 @@ class KelpStrategy(Strategy):
         self.mid_prices.append(mid_price)
         self.ticks.append(self.tick)
 
-        fair_value = round(self.simple_linear_regression(self.ticks, self.mid_prices, self.tick + 100))
+        #lin reg only when 30 data points are available
+        if self.tick < 3000:
+            order_depth = state.order_depths[self.symbol]
+            best_bid = max(order_depth.buy_orders.keys())
+            best_ask = min(order_depth.sell_orders.keys())
+            fair_value =  round((best_bid + best_ask) / 2)
+        else:
+            fair_value = round(self.simple_linear_regression(self.ticks, self.mid_prices, self.tick + 100))
 
         orders = []
         buy_volume = 0
@@ -168,13 +187,30 @@ class KelpStrategy(Strategy):
         return orders
 
 
- #volatile with trends
-class SquidInkStrategy(Strategy):
-     def __init__(self, symbol: str, limit: int) -> None:
-         super().__init__(symbol, limit)
-     def act(self, state: TradingState) -> list[Order]:
-         return []
 
+
+#volatile with only 1-2 active participants
+class SquidInkStrategy(Strategy):
+    def __init__(self, symbol: str, limit: int) -> None:
+        super().__init__(symbol, limit)
+
+    def act(self, state: TradingState):
+        order_depth = state.order_depths[self.symbol]
+        position = state.position.get(self.symbol, 0)
+        orders = []
+
+        best_bid = max(order_depth.buy_orders.keys())
+        best_ask = min(order_depth.sell_orders.keys())
+        fair_value = (best_bid + best_ask) / 2
+
+        buy_volume = 0
+        sell_volume = 0
+
+        return []
+    
+
+
+#main 
 class Trader:
     
     def __init__(self) -> None:
@@ -182,14 +218,14 @@ class Trader:
       # rr is stable while kelp is volatile
       self.limits = { 
           "RAINFOREST_RESIN" : 50,
-          "KELP" : 50, 
-          "SQUID_INK" : 50, 
+          "KELP" : 50,  
+          "SQUID_INK" :50,
       }
 
       strategy_classes = {
           "RAINFOREST_RESIN" : ResinStrategy,
           "KELP" : KelpStrategy,
-          #"SQUID_INK" : SquidInkStrategy,
+          "SQUID_INK" : SquidInkStrategy,
     
       }
 
@@ -201,6 +237,7 @@ class Trader:
     
     
     def run(self, state: TradingState):
+
         print(f"[TRADER] Positions: {state.position}")
         
         result = {}
