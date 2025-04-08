@@ -1,10 +1,7 @@
 from collections import deque
-from datamodel import Listing, Observation, Order, OrderDepth, ProsperityEncoder, Symbol, Trade, TradingState
-from typing import Any
+from datamodel import Order, TradingState
 import numpy as np
-import jsonpickle
-import json
-import math
+
 
 
 
@@ -152,10 +149,7 @@ class KelpStrategy(Strategy):
 
         #lin reg only when 30 data points are available
         if self.tick < 3000:
-            order_depth = state.order_depths[self.symbol]
-            best_bid = max(order_depth.buy_orders.keys())
-            best_ask = min(order_depth.sell_orders.keys())
-            fair_value =  round((best_bid + best_ask) / 2)
+            fair_value =  mid_price
         else:
             fair_value = round(self.simple_linear_regression(self.ticks, self.mid_prices, self.tick + 100))
 
@@ -163,18 +157,8 @@ class KelpStrategy(Strategy):
         buy_volume = 0
         sell_volume = 0
 
-        # --- MARKET TAKE ---
-        if best_ask <= fair_value - self.take_width:
-            quantity = min(-order_depth.sell_orders[best_ask], self.limit - position)
-            if quantity > 0:
-                orders.append(Order(self.symbol, best_ask, quantity))
-                buy_volume += quantity
+       # need better market taking
 
-        if best_bid >= fair_value + self.take_width:
-            quantity = min(order_depth.buy_orders[best_bid], self.limit + position)
-            if quantity > 0:
-                orders.append(Order(self.symbol, best_bid, -quantity))
-                sell_volume += quantity
 
 
         # --- MARKET MAKE ---
@@ -198,64 +182,61 @@ class KelpStrategy(Strategy):
 
 
 #volatile with only 1-2 active participants
+# super volatile pnl need to clean this up
 class SquidInkStrategy(Strategy):
-    def __init__(self, symbol: str, limit: int) -> None:
-        self.symbol = symbol
-        self.limit = limit
-        self.tick = 0
-        self.segment_interval = 100
-        self.last_segment_mid = None
-        self.last_decision_tick = 0
+      def __init__(self, symbol: str, limit: int) -> None:
+          self.symbol = symbol
+          self.limit = limit
+          self.tick = 0
+          self.segment_interval = 100
+          self.last_segment_mid = None
+          self.last_decision_tick = 0
 
-    def act(self, state: TradingState):
-        self.tick += 1
-        order_depth = state.order_depths[self.symbol]
-        position = state.position.get(self.symbol, 0)
-        if not order_depth.buy_orders or not order_depth.sell_orders:
-            return []
-        best_bid = max(order_depth.buy_orders.keys())
-        best_ask = min(order_depth.sell_orders.keys())
-        mid_price = (best_bid + best_ask) / 2
+      def act(self, state: TradingState):
+          self.tick += 1
+          order_depth = state.order_depths[self.symbol]
+          position = state.position.get(self.symbol, 0)
+          if not order_depth.buy_orders or not order_depth.sell_orders:
+              return []
+          best_bid = max(order_depth.buy_orders.keys())
+          best_ask = min(order_depth.sell_orders.keys())
+          mid_price = (best_bid + best_ask) / 2
 
-        ## manually set for start 
-        if self.tick == 1:
-            self.last_segment_mid = mid_price
+          ## manually set for start 
+          if self.tick == 1:
+              self.last_segment_mid = mid_price
+          
+          
+          decision_time = False
 
-        decision_time = False
-        if self.tick - self.last_decision_tick >= self.segment_interval:
-            decision_time = True
-            self.last_decision_tick = self.tick
-        decision = None
-        if decision_time:
-            delta = self.last_segment_mid - mid_price
-            if delta > 10:
-                decision = "buy"
-            elif delta < -10:
-                decision = "sell"
-            else:
-                decision = "hold"
-            self.last_segment_mid = mid_price
+          if self.tick - self.last_decision_tick >= self.segment_interval:
+              decision_time = True
+              self.last_decision_tick = self.tick
+          decision = None
+          if decision_time:
+              delta = self.last_segment_mid - mid_price
+              if delta > 10:
+                  decision = "buy"
+              elif delta < -10:
+                  decision = "sell"
+              else:
+                  decision = "hold"
+              self.last_segment_mid = mid_price
 
-        orders = []
+              
+          orders = []
+          if decision == "buy":
+              quantity = min(-order_depth.sell_orders[best_ask], self.limit - position)
+              if quantity > 0:
+                  orders.append(Order(self.symbol, best_ask, quantity))  
+          elif decision == "sell":
+              quantity = min(order_depth.buy_orders[best_bid], self.limit + position)
+              if quantity > 0:
+                  orders.append(Order(self.symbol, best_bid, -quantity))  
+          elif decision == "hold":
+            pass
+          return orders
 
-        if decision == "buy":
-            quantity = min(-order_depth.sell_orders[best_ask], self.limit - position)
-            if quantity > 0:
-                orders.append(Order(self.symbol, best_ask, quantity))  
-        elif decision == "sell":
-            quantity = min(order_depth.buy_orders[best_bid], self.limit + position)
-            if quantity > 0:
-                orders.append(Order(self.symbol, best_bid, -quantity))  
-        elif decision == "hold":
-            # maybe market make
-            bid_price = best_bid + 1
-            ask_price = best_ask - 1
-            qty = 20
-            if position < self.limit:
-                orders.append(Order(self.symbol, bid_price, qty))
-            if position > -self.limit:
-                orders.append(Order(self.symbol, ask_price, -qty))
-        return orders
     
 
 
