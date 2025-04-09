@@ -1,6 +1,7 @@
 from collections import deque
 from datamodel import Order, TradingState
 import numpy as np
+import math
 
 
 
@@ -112,71 +113,102 @@ class KelpStrategy(Strategy):
     def __init__(self, symbol: str, limit: int) -> None:
         super().__init__(symbol, limit)
         self.take_width = 1
-        self.edge_width = 2
+        self.edge_width = 3.5
         self.tick = 0
-        self.mid_prices = deque(maxlen=30)
-        self.ticks = deque(maxlen=30)
-
-    def simple_linear_regression(self, xs, ys, next_x):
-        X = np.array(xs)
-        Y = np.array(ys)
-        if len(X) == 0:
-            return 0
-        x_mean = X.mean()
-        y_mean = Y.mean()
-        if np.var(X) == 0:
-            return Y[-1]
-
-        slope = np.sum((X - x_mean) * (Y - y_mean)) / np.sum((X - x_mean) ** 2)
-        intercept = y_mean - slope * x_mean
-        return slope * next_x + intercept
-
+        self.kelp_prices = []
+        self.kelp_vwap = []
 
     def act(self, state: TradingState) -> list[Order]:
-        self.tick += 100
+        self.tick += 1
         order_depth = state.order_depths[self.symbol]
         position = state.position.get(self.symbol, 0)
 
         if not order_depth.buy_orders or not order_depth.sell_orders:
             return []
 
-        best_bid = max(order_depth.buy_orders.keys())
         best_ask = min(order_depth.sell_orders.keys())
-        mid_price = (best_bid + best_ask) / 2
+        best_bid = max(order_depth.buy_orders.keys())
 
-        self.mid_prices.append(mid_price)
-        self.ticks.append(self.tick)
+        # --- Filtered Fair Value ---
+        filtered_asks = [p for p in order_depth.sell_orders if -order_depth.sell_orders[p] >= 15]
+        filtered_bids = [p for p in order_depth.buy_orders if order_depth.buy_orders[p] >= 15]
 
-        #lin reg only when 30 data points are available
-        if self.tick < 3000:
-            fair_value =  mid_price
+        mm_ask = min(filtered_asks) if filtered_asks else best_ask
+        mm_bid = max(filtered_bids) if filtered_bids else best_bid
+        mmmid_price = (mm_bid + mm_ask) / 2
+
+        self.kelp_prices.append(mmmid_price)
+
+        volume = -order_depth.sell_orders[best_ask] + order_depth.buy_orders[best_bid]
+        if volume != 0:
+            vwap = (best_bid * (-order_depth.sell_orders[best_ask]) + best_ask * order_depth.buy_orders[best_bid]) / volume
         else:
-            fair_value = round(self.simple_linear_regression(self.ticks, self.mid_prices, self.tick + 100))
+            vwap = mmmid_price
+        self.kelp_vwap.append({"vol": volume, "vwap": vwap})
+
+        if len(self.kelp_prices) > 10:
+            self.kelp_prices.pop(0)
+        if len(self.kelp_vwap) > 10:
+            self.kelp_vwap.pop(0)
+
+        fair_value = mmmid_price  # Using filtered mid as fair value
 
         orders = []
         buy_volume = 0
         sell_volume = 0
 
-       # need better market taking
+        # --- Market Taking ---
+        if best_ask <= fair_value - self.take_width:
+            ask_volume = -order_depth.sell_orders[best_ask]
+            if ask_volume <= 20:
+                qty = min(ask_volume, self.limit - position)
+                if qty > 0:
+                    self.buy(best_ask, qty)
+                    buy_volume += qty
 
+        if best_bid >= fair_value + self.take_width:
+            bid_volume = order_depth.buy_orders[best_bid]
+            if bid_volume <= 20:
+                qty = min(bid_volume, self.limit + position)
+                if qty > 0:
+                    self.sell(best_bid, qty)
+                    sell_volume += qty
 
+        # --- Position Clearing ---
+        post_take_pos = position + buy_volume - sell_volume
+        fair_bid = math.floor(fair_value)
+        fair_ask = math.ceil(fair_value)
 
-        # --- MARKET MAKE ---
-        book_asks = [p for p in order_depth.sell_orders if p > fair_value + self.edge_width - 1]
-        book_bids = [p for p in order_depth.buy_orders if p < fair_value - self.edge_width + 1]
+        buy_clear_qty = self.limit - (position + buy_volume)
+        sell_clear_qty = self.limit + (position - sell_volume)
 
-        ask_quote = min(book_asks, default=fair_value + self.edge_width) - 1
-        bid_quote = max(book_bids, default=fair_value - self.edge_width) + 1
+        if post_take_pos > 0 and fair_ask in order_depth.buy_orders:
+            clear_qty = min(order_depth.buy_orders[fair_ask], post_take_pos, sell_clear_qty)
+            if clear_qty > 0:
+                self.sell(fair_ask, clear_qty)
+                sell_volume += clear_qty
+
+        if post_take_pos < 0 and fair_bid in order_depth.sell_orders:
+            clear_qty = min(-order_depth.sell_orders[fair_bid], -post_take_pos, buy_clear_qty)
+            if clear_qty > 0:
+                self.buy(fair_bid, clear_qty)
+                buy_volume += clear_qty
+
+        # --- Market Making ---
+        aaf = [p for p in order_depth.sell_orders if p > fair_value + 1]
+        bbf = [p for p in order_depth.buy_orders if p < fair_value - 1]
+        baaf = min(aaf) if aaf else fair_value + 2
+        bbbf = max(bbf) if bbf else fair_value - 2
 
         buy_qty = self.limit - (position + buy_volume)
         sell_qty = self.limit + (position - sell_volume)
 
         if buy_qty > 0:
-            orders.append(Order(self.symbol, bid_quote, buy_qty))
+            self.buy(int(bbbf + 1), buy_qty)
         if sell_qty > 0:
-            orders.append(Order(self.symbol, ask_quote, -sell_qty))
+            self.sell(int(baaf - 1), sell_qty)
 
-        return orders
+        return self.orders
 
 
 
