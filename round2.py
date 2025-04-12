@@ -1,6 +1,7 @@
 from datamodel import Order, TradingState
 import numpy as np
 import math
+from collections import defaultdict
 
 
 
@@ -219,232 +220,99 @@ class KelpStrategy(Strategy):
 
 #volatile with only 1-2 active participants
 # super volatile pnl need to clean this up
-
 class SquidInkStrategy(Strategy):
     def __init__(self, symbol: str, limit: int) -> None:
         super().__init__(symbol, limit)
-        # Initialize internal state storage in our own state dictionary.
-        self.state = {}
-        self.state.setdefault("prices", [])
-        self.state.setdefault("position", 0)
-        self.state.setdefault("entry_price", None)  
-
-        self.rolling_window = 50         
-        self.z_entry_threshold = 1.5       
-        self.z_exit_threshold = 0.3
-        self.max_position = 50        
-
-        # Dynamic trade sizing
-        self.min_trade_qty = 5             # Minimum quantity to trade
-        self.max_trade_qty = 30            # Maximum quantity to trade
-
-        # Profit-taking settings
-        self.profit_take_threshold = 300   # Profit (in tick-units) to trigger profit taking
-        self.profit_lock_steps = 5         # Number of units to exit when profit target is reached
-
-    def calculate_dynamic_quantity(self, z_score: float) -> int:
-        strength = abs(z_score) / self.z_entry_threshold
-        qty = self.min_trade_qty + (strength - 1) * (self.max_trade_qty - self.min_trade_qty)
-        return max(self.min_trade_qty, min(int(qty), self.max_trade_qty))
-
-    def update_entry_price(self, midprice: float, trade_qty: int, position: int):
-
-        entry_price = self.state.get("entry_price")
-        abs_pos = abs(position)
-
-        if abs_pos == 0:
-            self.state["entry_price"] = midprice
-
-        elif entry_price is not None:
-            total_value = entry_price * abs_pos + midprice * abs(trade_qty)
-            new_qty = abs_pos + abs(trade_qty)
-            self.state["entry_price"] = total_value / new_qty
-
-    def check_take_profit(self, midprice: float, position: int) -> bool:
-
-        entry_price = self.state.get("entry_price")
-
-        if entry_price is None:
-            return False
-        
-        pnl = 0
-
-        if position > 0:
-            pnl = (midprice - entry_price) * position
-
-        elif position < 0:
-            pnl = (entry_price - midprice) * abs(position)
-
-        return pnl >= self.profit_take_threshold
-
-    def get_mid_price(self, order_depth) -> float:
-
-        if not order_depth.buy_orders or not order_depth.sell_orders:
-            return None
-        
-        best_bid = max(order_depth.buy_orders.keys())
-        best_ask = min(order_depth.sell_orders.keys())
-
-        return (best_bid + best_ask) / 2.0
 
     def act(self, state: 'TradingState') -> list:
-
-        self.orders = []
-        product = self.symbol
-        order_depth = state.order_depths[self.symbol]
-
-        if not order_depth:
-            return self.orders
-
-        position = state.position.get(product, 0)
-
-        midprice = self.get_mid_price(order_depth)
-
-        if midprice is None:
-            return self.orders
-
-        # Update price history in state
-        self.state["prices"].append(midprice)
-        prices = self.state["prices"]
-        if len(prices) < self.rolling_window:
-            return []  # Wait until enough data is collected.
-
-        # --- Profit-taking ---
-        if self.check_take_profit(midprice, position):
-
-            if position > 0:
-                self.sell(int(midprice), min(position, self.profit_lock_steps))
-
-            elif position < 0:
-                self.buy(int(midprice), min(-position, self.profit_lock_steps))
-
-            return self.orders  # Skip further logic this tick.
-
-        # Compute rolling statistics.
-        recent = prices[-self.rolling_window:]
-
-        mean_price = np.mean(recent)
-        std_price = np.std(recent)
-
-        if std_price == 0:
-            return self.orders
-
-        # Compute z-score for current midprice.
-        z = (midprice - mean_price) / std_price
-
-      
-
-        # --- Entry logic: only if flat.
-        if z < -self.z_entry_threshold and position < self.max_position:
-            qty = min(self.calculate_dynamic_quantity(z), self.max_position - position)
-            if qty > 0:
-                self.update_entry_price(midprice, qty, position)
-                self.buy(int(midprice), qty)
-
-        elif z > self.z_entry_threshold and position > -self.max_position:
-            qty = min(self.calculate_dynamic_quantity(z), self.max_position + position)
-            if qty > 0:
-                self.update_entry_price(midprice, - qty, position)
-                self.sell(int(midprice), qty)
-
-        # Exit logic
-        elif abs(z) < self.z_exit_threshold and position != 0:
-            self.sell(int(midprice), position)
-            self.state["entry_price"] = None  
-
         return self.orders
-    
 
-class PicnicArbitrageStrategy(Strategy):
+
+
+
+class BasketStrategy(Strategy):
     def __init__(self, symbol: str, limit: int):
         super().__init__(symbol, limit)
-        self.component_recipes = {
-            "PICNIC_BASKET1": {"CROISSANTS": 6, "JAMS": 3, "DJEMBES": 1},
-            "PICNIC_BASKET2": {"CROISSANTS": 4, "JAMS": 2},
-        }
-        self.threshold = 10 
 
-    def act(self, state: TradingState) -> list[Order]:
-        self.orders = []
+    def act(self, state: TradingState) -> None:
+        if any(symbol not in state.order_depths for symbol in ["CROISSANTS", "JAMS", "DJEMBES", "PICNIC_BASKET1", "PICNIC_BASKET2"]):
+            return
 
-        if self.symbol not in self.component_recipes:
-            return self.orders  
+        croissants = self.get_mid_price(state, "CROISSANTS")
+        jams = self.get_mid_price(state, "JAMS")
+        djembes = self.get_mid_price(state, "DJEMBES")
+        basket1 = self.get_mid_price(state, "PICNIC_BASKET1")
+        basket2 = self.get_mid_price(state, "PICNIC_BASKET2")
 
-        components = self.component_recipes[self.symbol]
-        order_depth = state.order_depths.get(self.symbol)
-        if not order_depth:
-            return self.orders
+        value1 = 6 * croissants + 3 * jams + 1 * djembes
+        value2 = 4 * croissants + 2 * jams
 
-        # Midprice of the basket
-        basket_mid = self.get_mid_price(state, self.symbol)
-        if basket_mid is None:
-            return self.orders
+        diff = 0
 
-        # Midprice of components
-        component_value = 0
-        for sym, qty in components.items():
-            comp_mid = self.get_mid_price(state, sym)
-            if comp_mid is None:
-                return self.orders
-            component_value += qty * comp_mid
+        if self.symbol == "PICNIC_BASKET1":
+            diff = basket1 - value1
+        elif self.symbol == "PICNIC_BASKET2":
+            diff = basket2 - value2
+        elif self.symbol == "CROISSANTS":
+            implied1 = basket1 * 6 / 10
+            implied2 = basket2 * 4 / 6
+            avg_implied = (implied1 + implied2) / 2
+            diff = croissants - avg_implied
+        elif self.symbol == "JAMS":
+            implied1 = basket1 * 3 / 10
+            implied2 = basket2 * 2 / 6
+            avg_implied = (implied1 + implied2) / 2
+            diff = jams - avg_implied
+        elif self.symbol == "DJEMBES":
+            implied = basket1 * 1 / 10  
+            diff = djembes - implied
 
-        diff = basket_mid - component_value
-        print(f"[{self.symbol}] Basket Mid: {basket_mid}, Component Value: {component_value}, Diff: {diff}")
+        # Thresholds from CSV analysis (2 std dev wide around mean diff)
+        long_threshold, short_threshold = {
+            "CROISSANTS": (-23420.47, -23397.54),
+            "JAMS": (-11615.67, -11578.34),
+            "DJEMBES": (-3265.23, -3241.41),
+            "PICNIC_BASKET1": (-109.24, 103.47),
+            "PICNIC_BASKET2": (-63.87, 64.92),
+        }[self.symbol]
 
-        if diff > self.threshold:
-            self.go_short(state)
-
-        elif diff < -self.threshold:
+        if diff < long_threshold:
             self.go_long(state)
-            
-        else:
-            pass
-
+        elif diff > short_threshold:
+            self.go_short(state)
+        
         return self.orders
 
     def get_mid_price(self, state: TradingState, symbol: str) -> float:
+        order_depth = state.order_depths[symbol]
+        buy_orders = sorted(order_depth.buy_orders.items(), reverse=True)
+        sell_orders = sorted(order_depth.sell_orders.items())
 
-        order_depth = state.order_depths.get(symbol)
+        popular_buy_price = max(buy_orders, key=lambda tup: tup[1])[0]
+        popular_sell_price = min(sell_orders, key=lambda tup: tup[1])[0]
 
-        if not order_depth or not order_depth.buy_orders or not order_depth.sell_orders:
-            return None
-        
-        best_bid = max(order_depth.buy_orders.keys())
-        best_ask = min(order_depth.sell_orders.keys())
-
-        return (best_bid + best_ask) / 2
+        return (popular_buy_price + popular_sell_price) / 2
 
     def go_long(self, state: TradingState) -> None:
+        order_depth = state.order_depths[self.symbol]
+        price = max(order_depth.sell_orders.keys())
 
-        order_depth = state.order_depths.get(self.symbol)
-
-        if not order_depth or not order_depth.sell_orders:
-            print(f"No sell orders for {self.symbol} to go long")
-            return
-        
-        price = min(order_depth.sell_orders.keys())
         position = state.position.get(self.symbol, 0)
-        qty = self.limit - position
+        available_qty = self.limit - position
+        scaled_qty = max(1, min(10 + int(abs(position) * 0.5), available_qty))
 
-        if qty > 0:
-            print(f"Buying {qty} of {self.symbol} at {price}")
-            self.buy(price, qty)
+        self.buy(price, scaled_qty)
 
     def go_short(self, state: TradingState) -> None:
+        order_depth = state.order_depths[self.symbol]
+        price = min(order_depth.buy_orders.keys())
 
-        order_depth = state.order_depths.get(self.symbol)
-
-        if not order_depth or not order_depth.buy_orders:
-            print(f"No buy orders for {self.symbol} to go short")
-            return
-        
-        price = max(order_depth.buy_orders.keys())
         position = state.position.get(self.symbol, 0)
-        qty = self.limit + position
+        available_qty = self.limit + position
+        scaled_qty = max(1, min(10 + int(abs(position) * 0.5), available_qty))
 
-        if qty > 0:
-            print(f"Selling {qty} of {self.symbol} at {price}")
-            self.sell(price, qty)
+        self.sell(price, scaled_qty)
+
 
 
 
@@ -456,8 +324,8 @@ class Trader:
     
       # rr is stable while kelp is volatile
       self.limits = { 
-          #"RAINFOREST_RESIN" : 50,
-          #"KELP" : 50,  
+          "RAINFOREST_RESIN" : 50,
+          "KELP" : 50,  
           #"SQUID_INK" : 50,
           "CROISSANTS" : 250,
           "JAMS" : 50,
@@ -467,14 +335,14 @@ class Trader:
       }
 
       strategy_classes = {
-          #"RAINFOREST_RESIN" : ResinStrategy,
-          #"KELP" : KelpStrategy,
+          "RAINFOREST_RESIN" : ResinStrategy,
+          "KELP" : KelpStrategy,
           #"SQUID_INK" : SquidInkStrategy,
-          "CROISSANTS" : PicnicArbitrageStrategy,
-          "JAMS" : PicnicArbitrageStrategy,
-          "DJEMBES" : PicnicArbitrageStrategy,
-          "PICNIC_BASKET1" : PicnicArbitrageStrategy,
-          "PICNIC_BASKET2" : PicnicArbitrageStrategy,
+          "CROISSANTS" : BasketStrategy,
+          "JAMS" : BasketStrategy,
+          "DJEMBES" : BasketStrategy,
+          "PICNIC_BASKET1" : BasketStrategy,
+          "PICNIC_BASKET2" : BasketStrategy,
     
       }
 
