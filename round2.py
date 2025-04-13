@@ -1,7 +1,8 @@
 from datamodel import Order, TradingState
 import numpy as np
 import math
-from collections import defaultdict
+from collections import defaultdict, deque
+import statistics
 
 
 
@@ -14,15 +15,19 @@ class Strategy:
         self.symbol = symbol
         self.limit = limit
         self.state = {}
+        self.hedge_targets = defaultdict(int) 
+
 
     def run(self, state: TradingState) -> list[Order]:
         self.orders = []
         return self.act(state)
 
     def buy(self, price: int, quantity: int) -> None:
+        print(f"[BUY] {self.symbol}: {quantity} @ {price}")
         self.orders.append(Order(self.symbol, int(price), quantity))
 
     def sell(self, price: int, quantity: int) -> None:
+        print(f"[SELL] {self.symbol}: {quantity} @ {price}")
         self.orders.append(Order(self.symbol, int(price), -quantity))
 
 
@@ -228,90 +233,290 @@ class SquidInkStrategy(Strategy):
         return self.orders
 
 
-
-
 class BasketStrategy(Strategy):
     def __init__(self, symbol: str, limit: int):
         super().__init__(symbol, limit)
+        self.component_recipes = {
+            "PICNIC_BASKET1": {"CROISSANTS": 6, "JAMS": 3, "DJEMBES": 1},
+            "PICNIC_BASKET2": {"CROISSANTS": 4, "JAMS": 2},
+        }
+        self.threshold = 50
 
-    def act(self, state: TradingState) -> None:
-        if any(symbol not in state.order_depths for symbol in ["CROISSANTS", "JAMS", "DJEMBES", "PICNIC_BASKET1", "PICNIC_BASKET2"]):
-            return
+    def act(self, state: TradingState) -> list[Order]:
+        self.orders = []
+        if self.symbol not in self.component_recipes:
+            return []
 
-        croissants = self.get_mid_price(state, "CROISSANTS")
-        jams = self.get_mid_price(state, "JAMS")
-        djembes = self.get_mid_price(state, "DJEMBES")
-        basket1 = self.get_mid_price(state, "PICNIC_BASKET1")
-        basket2 = self.get_mid_price(state, "PICNIC_BASKET2")
+        components = self.component_recipes[self.symbol]
+        od = state.order_depths.get(self.symbol)
+        if not od:
+            return []
 
-        value1 = 6 * croissants + 3 * jams + 1 * djembes
-        value2 = 4 * croissants + 2 * jams
+        basket_mid = self.get_mid_price(state, self.symbol)
+        if basket_mid is None:
+            return []
 
-        diff = 0
+        component_value = 0
+        for sym, qty in components.items():
+            comp_mid = self.get_mid_price(state, sym)
+            if comp_mid is None:
+                return []
+            print(f"[{self.symbol}] Component {sym} mid: {comp_mid} x {qty}")
+            component_value += qty * comp_mid
 
-        if self.symbol == "PICNIC_BASKET1":
-            diff = basket1 - value1
-        elif self.symbol == "PICNIC_BASKET2":
-            diff = basket2 - value2
-        elif self.symbol == "CROISSANTS":
-            implied1 = basket1 * 6 / 10
-            implied2 = basket2 * 4 / 6
-            avg_implied = (implied1 + implied2) / 2
-            diff = croissants - avg_implied
-        elif self.symbol == "JAMS":
-            implied1 = basket1 * 3 / 10
-            implied2 = basket2 * 2 / 6
-            avg_implied = (implied1 + implied2) / 2
-            diff = jams - avg_implied
-        elif self.symbol == "DJEMBES":
-            implied = basket1 * 1 / 10  
-            diff = djembes - implied
+        diff = basket_mid - component_value
+        print(f"[{self.symbol}] Basket Mid: {basket_mid}, Component Value: {component_value}, Diff: {diff}")
 
-        # Thresholds from CSV analysis (2 std dev wide around mean diff)
-        long_threshold, short_threshold = {
-            "CROISSANTS": (-23420.47, -23397.54),
-            "JAMS": (-11615.67, -11578.34),
-            "DJEMBES": (-3265.23, -3241.41),
-            "PICNIC_BASKET1": (-109.24, 103.47),
-            "PICNIC_BASKET2": (-63.87, 64.92),
-        }[self.symbol]
+        if diff > self.threshold:
+            self.go_short(state, components)
+        elif diff < -self.threshold:
+            self.go_long(state, components)
 
-        if diff < long_threshold:
-            self.go_long(state)
-        elif diff > short_threshold:
-            self.go_short(state)
-        
         return self.orders
 
-    def get_mid_price(self, state: TradingState, symbol: str) -> float:
-        order_depth = state.order_depths[symbol]
-        buy_orders = sorted(order_depth.buy_orders.items(), reverse=True)
-        sell_orders = sorted(order_depth.sell_orders.items())
+    def get_mid_price(self, state: TradingState, symbol: str):
+        od = state.order_depths.get(symbol)
+        if not od or not od.buy_orders or not od.sell_orders:
+            return None
+        return (max(od.buy_orders) + min(od.sell_orders)) / 2
 
-        popular_buy_price = max(buy_orders, key=lambda tup: tup[1])[0]
-        popular_sell_price = min(sell_orders, key=lambda tup: tup[1])[0]
-
-        return (popular_buy_price + popular_sell_price) / 2
-
-    def go_long(self, state: TradingState) -> None:
-        order_depth = state.order_depths[self.symbol]
-        price = max(order_depth.sell_orders.keys())
-
+    def go_short(self, state, components):
+        od = state.order_depths[self.symbol]
+        price = max(od.buy_orders)
         position = state.position.get(self.symbol, 0)
-        available_qty = self.limit - position
-        scaled_qty = max(1, min(10 + int(abs(position) * 0.5), available_qty))
+        qty = min(self.limit + position, abs(od.buy_orders.get(price, 0)))
+        if qty <= 0:
+            return
 
-        self.buy(price, scaled_qty)
+        print(f"→ SELL {qty} {self.symbol} at {price}")
+        self.sell(price, qty)
 
-    def go_short(self, state: TradingState) -> None:
-        order_depth = state.order_depths[self.symbol]
-        price = min(order_depth.buy_orders.keys())
+        print(f"[{self.symbol}] Hedge targets after update: {dict(self.hedge_targets)}")
 
+        for comp, mult in components.items():
+            self.hedge_targets[comp] += qty * mult
+            print(f"[{self.symbol}] → hedge +{qty * mult} {comp}")
+
+    def go_long(self, state, components):
+        od = state.order_depths[self.symbol]
+        price = min(od.sell_orders)
         position = state.position.get(self.symbol, 0)
-        available_qty = self.limit + position
-        scaled_qty = max(1, min(10 + int(abs(position) * 0.5), available_qty))
+        qty = min(self.limit - position, abs(od.sell_orders.get(price, 0)))
+        if qty <= 0:
+            return
 
-        self.sell(price, scaled_qty)
+        print(f"→ BUY {qty} {self.symbol} at {price}")
+        self.buy(price, qty)
+
+        print(f"[{self.symbol}] Hedge targets after update: {dict(self.hedge_targets)}")
+
+        for comp, mult in components.items():
+            self.hedge_targets[comp] -= qty * mult
+            print(f"[{self.symbol}] → hedge -{qty * mult} {comp}")
+
+    
+
+
+
+
+
+
+class CroissantStrategy(Strategy):
+    def __init__(self, symbol: str, limit: int):
+        super().__init__(symbol, limit)
+        self.window = deque(maxlen=40)
+        self.threshold = 2
+        self.buffer = 20
+
+    def act(self, state: TradingState) -> list[Order]:
+        order_depth = state.order_depths[self.symbol]
+        position = state.position.get(self.symbol, 0)
+
+        if not order_depth.buy_orders or not order_depth.sell_orders:
+            return []
+
+        best_bid = max(order_depth.buy_orders)
+        best_ask = min(order_depth.sell_orders)
+        mid_price = (best_bid + best_ask) / 2
+
+        def mid(sym):
+            d = state.order_depths.get(sym, None)
+            if not d or not d.buy_orders or not d.sell_orders:
+                return None
+            return (max(d.buy_orders) + min(d.sell_orders)) / 2
+
+        b1 = mid("PICNIC_BASKET1")
+        b2 = mid("PICNIC_BASKET2")
+        j = mid("JAMS")
+        d = mid("DJEMBES")
+
+        if None in [b1, b2, j, d]:
+            return []
+
+        synth_cross_1 = (b1 - 4 * j - d) / 6
+        synth_cross_2 = (b2 - 2 * j) / 4
+
+        mismatch_same_dir = ((synth_cross_1 > mid_price and synth_cross_2 > mid_price) or
+                              (synth_cross_1 < mid_price and synth_cross_2 < mid_price))
+
+        if not mismatch_same_dir:
+            return []
+
+        spread = ((synth_cross_1 + synth_cross_2) / 2) - mid_price
+        self.window.append(spread)
+
+        if len(self.window) < self.window.maxlen:
+            return []
+
+        mean = statistics.mean(self.window)
+        stdev = statistics.stdev(self.window)
+        if stdev == 0:
+            return []
+
+        zscore = (spread - mean) / stdev
+        print(f"[JAMS] Z-score: {zscore:.2f}, spread: {spread:.2f}, jam_mid: {mid_price:.2f}, position: {position}")
+
+        if zscore > self.threshold:
+            vol = min(order_depth.buy_orders.get(best_bid, 0), self.limit - position - self.buffer)
+            if vol > 0:
+                self.sell(best_bid, vol)
+        elif zscore < -self.threshold:
+            vol = min(-order_depth.sell_orders.get(best_ask, 0), self.limit + position - self.buffer)
+            if vol > 0:
+                self.buy(best_ask, vol)
+
+        return self.orders
+
+
+
+# ---------- Component Strategy for JAMS ----------
+class JamStrategy(Strategy):
+    def __init__(self, symbol: str, limit: int):
+        super().__init__(symbol, limit)
+        self.window = deque(maxlen=40)
+        self.threshold = 2
+        self.buffer = 10
+
+    def act(self, state: TradingState) -> list[Order]:
+        order_depth = state.order_depths[self.symbol]
+        position = state.position.get(self.symbol, 0)
+
+        if not order_depth.buy_orders or not order_depth.sell_orders:
+            return []
+
+        best_bid = max(order_depth.buy_orders)
+        best_ask = min(order_depth.sell_orders)
+        mid_price = (best_bid + best_ask) / 2
+
+        def mid(sym):
+            d = state.order_depths.get(sym, None)
+            if not d or not d.buy_orders or not d.sell_orders:
+                return None
+            return (max(d.buy_orders) + min(d.sell_orders)) / 2
+
+        b1 = mid("PICNIC_BASKET1")
+        b2 = mid("PICNIC_BASKET2")
+        c = mid("CROISSANTS")
+        d = mid("DJEMBES")
+
+        if None in [b1, b2, c, d]:
+            return []
+
+        synth_jam_1 = (b1 - 6 * c - d) / 3
+        synth_jam_2 = (b2 - 4 * c) / 2
+
+        mismatch_same_dir = ((synth_jam_1 > mid_price and synth_jam_2 > mid_price) or
+                              (synth_jam_1 < mid_price and synth_jam_2 < mid_price))
+
+        if not mismatch_same_dir:
+            return []
+
+        spread = ((synth_jam_1 + synth_jam_2) / 2) - mid_price
+        self.window.append(spread)
+
+        if len(self.window) < self.window.maxlen:
+            return []
+
+        mean = statistics.mean(self.window)
+        stdev = statistics.stdev(self.window)
+        if stdev == 0:
+            return []
+
+        zscore = (spread - mean) / stdev
+        print(f"[JAMS] Z-score: {zscore:.2f}, spread: {spread:.2f}, jam_mid: {mid_price:.2f}, position: {position}")
+
+        if zscore > self.threshold:
+            vol = min(order_depth.buy_orders.get(best_bid, 0), self.limit - position - self.buffer)
+            if vol > 0:
+                self.sell(mid_price, vol)
+        elif zscore < -self.threshold:
+            vol = min(-order_depth.sell_orders.get(best_ask, 0), self.limit + position - self.buffer)
+            if vol > 0:
+                self.buy(mid_price, vol)
+
+        return self.orders
+
+
+
+# ---------- Component Strategy for DJEMBES ----------
+class DjembeStrategy(Strategy):
+    def __init__(self, symbol: str, limit: int):
+        super().__init__(symbol, limit)
+        self.window = deque(maxlen=40)
+        self.threshold = 2
+        self.buffer = 10
+
+    def act(self, state: TradingState) -> list[Order]:
+        order_depth = state.order_depths[self.symbol]
+        position = state.position.get(self.symbol, 0)
+
+        if not order_depth.buy_orders or not order_depth.sell_orders:
+            return []
+
+        best_bid = max(order_depth.buy_orders)
+        best_ask = min(order_depth.sell_orders)
+        mid_price = (best_bid + best_ask) / 2
+
+        def mid(sym):
+            d = state.order_depths.get(sym, None)
+            if not d or not d.buy_orders or not d.sell_orders:
+                return None
+            return (max(d.buy_orders) + min(d.sell_orders)) / 2
+
+        b1 = mid("PICNIC_BASKET1")
+        b2 = mid("PICNIC_BASKET2")
+        c = mid("CROISSANTS")
+        j = mid("JAMS")
+
+        if None in [b1, b2, c, j]:
+            return []
+
+        synth_dj = (b1 - 6 * c - 4*j)
+
+
+        spread = synth_dj - mid_price
+        self.window.append(spread)
+
+        if len(self.window) < self.window.maxlen:
+            return []
+
+        mean = statistics.mean(self.window)
+        stdev = statistics.stdev(self.window)
+        if stdev == 0:
+            return []
+
+        zscore = (spread - mean) / stdev
+
+        if zscore > self.threshold:
+            vol = min(order_depth.buy_orders.get(best_bid, 0), self.limit - position - self.buffer)
+            if vol > 0:
+                self.sell(best_bid, vol)
+        elif zscore < -self.threshold:
+            vol = min(-order_depth.sell_orders.get(best_ask, 0), self.limit + position - self.buffer)
+            if vol > 0:
+                self.buy(best_ask, vol)
+
+        return self.orders
 
 
 
@@ -324,25 +529,27 @@ class Trader:
     
       # rr is stable while kelp is volatile
       self.limits = { 
-          "RAINFOREST_RESIN" : 50,
-          "KELP" : 50,  
+          #"RAINFOREST_RESIN" : 50,
+          #"KELP" : 50,  
           #"SQUID_INK" : 50,
-          "CROISSANTS" : 250,
-          "JAMS" : 50,
-          "DJEMBES" : 60,
-          "PICNIC_BASKET1" : 60,
-          "PICNIC_BASKET2" : 100,
+          #"CROISSANTS" : 250,
+          "JAMS" : 350,
+          #"DJEMBES" : 60,
+          #"PICNIC_BASKET1" : 60,
+          #"PICNIC_BASKET2" : 100,
       }
 
+
+
       strategy_classes = {
-          "RAINFOREST_RESIN" : ResinStrategy,
-          "KELP" : KelpStrategy,
-          #"SQUID_INK" : SquidInkStrategy,
-          "CROISSANTS" : BasketStrategy,
-          "JAMS" : BasketStrategy,
-          "DJEMBES" : BasketStrategy,
-          "PICNIC_BASKET1" : BasketStrategy,
-          "PICNIC_BASKET2" : BasketStrategy,
+          #"RAINFOREST_RESIN" : ResinStrategy,
+          #"KELP" : KelpStrategy,
+          #"SQUID_INK" : KelpStrategy,
+          #"CROISSANTS" : CroissantStrategy,
+          "JAMS" : JamStrategy,
+          #"DJEMBES" : DjembeStrategy,
+          #"PICNIC_BASKET1" : BasketStrategy,
+          #"PICNIC_BASKET2" : BasketStrategy,
     
       }
 
@@ -372,4 +579,5 @@ class Trader:
         
   
                 
+
 
