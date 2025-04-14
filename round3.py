@@ -396,6 +396,59 @@ class DjembeStrategy(Strategy):
     def act(self, state: TradingState) -> list[Order]:
 
         return self.orders
+    
+
+class VolcanicStrategy(Strategy):
+    def __init__(self, symbol: str, limit: int):
+        super().__init__(symbol, limit)
+        self.rock_history = []
+        self.round = 0
+        self.base_premium = 5
+        self.margin = 10
+        self.max_order_size = 20
+
+    def get_strike(self, product: str) -> int:
+        if product.startswith("VOLCANIC_ROCK_VOUCHER_"):
+            return int(product.split("_")[-1])
+       
+    def act(self, state: TradingState) -> list[Order]:
+        self.orders = []
+        self.round += 1
+
+        rock_mid = self.get_mid_price(state, "VOLCANIC_ROCK")
+        if rock_mid is None or "VOUCHER" not in self.symbol:
+            return []
+
+        self.rock_history.append(rock_mid)
+        rock_window = self.rock_history[-20:] if len(self.rock_history) >= 20 else self.rock_history
+        smooth_rock = np.mean(rock_window)
+
+        decay = max(0.1, np.exp(-0.4 * self.round))
+        premium = self.base_premium * decay
+
+        strike = self.get_strike(self.symbol)
+        fair_value = max(0, smooth_rock - strike) + premium
+
+        voucher_mid = self.get_mid_price(state, self.symbol)
+        if voucher_mid is None:
+            return []
+
+        od = state.order_depths.get(self.symbol)
+        if not od:
+            return []
+
+        best_ask = min(od.sell_orders.keys(), default=None)
+        if best_ask is not None and best_ask < fair_value - self.margin:
+            qty = min(self.max_order_size, -od.sell_orders[best_ask])
+            self.buy(best_ask, qty)
+
+            
+        best_bid = max(od.buy_orders.keys(), default=None)
+        if best_bid is not None and best_bid > fair_value + self.margin:
+            qty = min(self.max_order_size, od.buy_orders[best_bid])
+            self.sell(best_bid, qty)
+
+        return self.orders
 
 
 
@@ -410,28 +463,39 @@ class Trader:
     def __init__(self) -> None:
 
       self.limits = { 
-          "RAINFOREST_RESIN" : 50,
-          "KELP" : 50,  
-          "SQUID_INK" : 50,
-          "CROISSANTS" : 250,
-          "JAMS" : 350,
-          "DJEMBES" : 60,
-          "PICNIC_BASKET1" : 60,
-          "PICNIC_BASKET2" : 100,
+          #"RAINFOREST_RESIN" : 50,
+          #"KELP" : 50,  
+          #"SQUID_INK" : 50,
+          #"CROISSANTS" : 250,
+          #"JAMS" : 350,
+          #"DJEMBES" : 60,
+          #"PICNIC_BASKET1" : 60,
+          #"PICNIC_BASKET2" : 100,
+          "VOLCANIC_ROCK" : 400,
+          "VOLCANIC_ROCK_VOUCHER_9500" : 200,
+          "VOLCANIC_ROCK_VOUCHER_9750" : 200,
+          "VOLCANIC_ROCK_VOUCHER_10000" : 200,
+          "VOLCANIC_ROCK_VOUCHER_10250" : 200,
+          "VOLCANIC_ROCK_VOUCHER_10500" : 200,
       }
 
 
 
       strategy_classes = {
-          "RAINFOREST_RESIN" : ResinStrategy,
-          "KELP" : KelpStrategy,
-          "SQUID_INK" : SquidInkStrategy,
-          "CROISSANTS" : CroissantStrategy,
-          "JAMS" : JamStrategy,
-          "DJEMBES" : DjembeStrategy,
-          "PICNIC_BASKET1" : BasketStrategy,
-          "PICNIC_BASKET2" : BasketStrategy,
-    
+          #"RAINFOREST_RESIN" : ResinStrategy,
+          #"KELP" : KelpStrategy,
+          #"SQUID_INK" : SquidInkStrategy,
+          #"CROISSANTS" : CroissantStrategy,
+          #"JAMS" : JamStrategy,
+          #"DJEMBES" : DjembeStrategy,
+          #"PICNIC_BASKET1" : BasketStrategy,
+          #"PICNIC_BASKET2" : BasketStrategy,
+          "VOLCANIC_ROCK" : VolcanicStrategy,
+          "VOLCANIC_ROCK_VOUCHER_9500" : VolcanicStrategy,
+          "VOLCANIC_ROCK_VOUCHER_9750" : VolcanicStrategy,
+          "VOLCANIC_ROCK_VOUCHER_10000" :VolcanicStrategy,
+          "VOLCANIC_ROCK_VOUCHER_10250" :VolcanicStrategy,
+          "VOLCANIC_ROCK_VOUCHER_10500" :VolcanicStrategy,
       }
 
       self.strategies = {
