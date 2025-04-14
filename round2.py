@@ -29,6 +29,12 @@ class Strategy:
     def sell(self, price: int, quantity: int) -> None:
         print(f"[SELL] {self.symbol}: {quantity} @ {price}")
         self.orders.append(Order(self.symbol, int(price), -quantity))
+    
+    def get_mid_price(self, state: TradingState, sym: str):
+        od = state.order_depths.get(sym)
+        if not od or not od.buy_orders or not od.sell_orders:
+            return None
+        return (max(od.buy_orders) + min(od.sell_orders)) / 2
 
 
 
@@ -226,11 +232,13 @@ class KelpStrategy(Strategy):
 #volatile with only 1-2 active participants
 # super volatile pnl need to clean this up
 class SquidInkStrategy(Strategy):
-    def __init__(self, symbol: str, limit: int) -> None:
+    def __init__(self, symbol: str, limit: int):
         super().__init__(symbol, limit)
 
-    def act(self, state: 'TradingState') -> list:
+    def act(self, state: TradingState) -> list[Order]:
         return self.orders
+
+
 
 
 class BasketStrategy(Strategy):
@@ -240,7 +248,7 @@ class BasketStrategy(Strategy):
             "PICNIC_BASKET1": {"CROISSANTS": 6, "JAMS": 3, "DJEMBES": 1},
             "PICNIC_BASKET2": {"CROISSANTS": 4, "JAMS": 2},
         }
-        self.threshold = 50
+        self.threshold = 10
 
     def act(self, state: TradingState) -> list[Order]:
         self.orders = []
@@ -261,58 +269,37 @@ class BasketStrategy(Strategy):
             comp_mid = self.get_mid_price(state, sym)
             if comp_mid is None:
                 return []
-            print(f"[{self.symbol}] Component {sym} mid: {comp_mid} x {qty}")
             component_value += qty * comp_mid
 
         diff = basket_mid - component_value
-        print(f"[{self.symbol}] Basket Mid: {basket_mid}, Component Value: {component_value}, Diff: {diff}")
+        position = state.position.get(self.symbol, 0)
 
         if diff > self.threshold:
-            self.go_short(state, components)
+            price = max(od.buy_orders)  
+            qty = min(abs(od.buy_orders.get(price, 0)), self.limit + position)
+            if qty > 0:
+                self.sell(price, qty)
+
         elif diff < -self.threshold:
-            self.go_long(state, components)
+            price = min(od.sell_orders)  
+            qty = min(abs(-od.sell_orders.get(price, 0)), self.limit - position)
+            if qty > 0:
+                self.buy(price, qty)
 
         return self.orders
 
-    def get_mid_price(self, state: TradingState, symbol: str):
-        od = state.order_depths.get(symbol)
+    def get_mid_price(self, state: TradingState, sym: str):
+        od = state.order_depths.get(sym)
         if not od or not od.buy_orders or not od.sell_orders:
             return None
         return (max(od.buy_orders) + min(od.sell_orders)) / 2
 
-    def go_short(self, state, components):
-        od = state.order_depths[self.symbol]
-        price = max(od.buy_orders)
-        position = state.position.get(self.symbol, 0)
-        qty = min(self.limit + position, abs(od.buy_orders.get(price, 0)))
-        if qty <= 0:
-            return
 
-        print(f"→ SELL {qty} {self.symbol} at {price}")
-        self.sell(price, qty)
 
-        print(f"[{self.symbol}] Hedge targets after update: {dict(self.hedge_targets)}")
 
-        for comp, mult in components.items():
-            self.hedge_targets[comp] += qty * mult
-            print(f"[{self.symbol}] → hedge +{qty * mult} {comp}")
 
-    def go_long(self, state, components):
-        od = state.order_depths[self.symbol]
-        price = min(od.sell_orders)
-        position = state.position.get(self.symbol, 0)
-        qty = min(self.limit - position, abs(od.sell_orders.get(price, 0)))
-        if qty <= 0:
-            return
 
-        print(f"→ BUY {qty} {self.symbol} at {price}")
-        self.buy(price, qty)
 
-        print(f"[{self.symbol}] Hedge targets after update: {dict(self.hedge_targets)}")
-
-        for comp, mult in components.items():
-            self.hedge_targets[comp] -= qty * mult
-            print(f"[{self.symbol}] → hedge -{qty * mult} {comp}")
 
     
 
@@ -324,66 +311,9 @@ class BasketStrategy(Strategy):
 class CroissantStrategy(Strategy):
     def __init__(self, symbol: str, limit: int):
         super().__init__(symbol, limit)
-        self.window = deque(maxlen=40)
-        self.threshold = 2
-        self.buffer = 20
 
     def act(self, state: TradingState) -> list[Order]:
-        order_depth = state.order_depths[self.symbol]
-        position = state.position.get(self.symbol, 0)
-
-        if not order_depth.buy_orders or not order_depth.sell_orders:
-            return []
-
-        best_bid = max(order_depth.buy_orders)
-        best_ask = min(order_depth.sell_orders)
-        mid_price = (best_bid + best_ask) / 2
-
-        def mid(sym):
-            d = state.order_depths.get(sym, None)
-            if not d or not d.buy_orders or not d.sell_orders:
-                return None
-            return (max(d.buy_orders) + min(d.sell_orders)) / 2
-
-        b1 = mid("PICNIC_BASKET1")
-        b2 = mid("PICNIC_BASKET2")
-        j = mid("JAMS")
-        d = mid("DJEMBES")
-
-        if None in [b1, b2, j, d]:
-            return []
-
-        synth_cross_1 = (b1 - 4 * j - d) / 6
-        synth_cross_2 = (b2 - 2 * j) / 4
-
-        mismatch_same_dir = ((synth_cross_1 > mid_price and synth_cross_2 > mid_price) or
-                              (synth_cross_1 < mid_price and synth_cross_2 < mid_price))
-
-        if not mismatch_same_dir:
-            return []
-
-        spread = ((synth_cross_1 + synth_cross_2) / 2) - mid_price
-        self.window.append(spread)
-
-        if len(self.window) < self.window.maxlen:
-            return []
-
-        mean = statistics.mean(self.window)
-        stdev = statistics.stdev(self.window)
-        if stdev == 0:
-            return []
-
-        zscore = (spread - mean) / stdev
-        print(f"[JAMS] Z-score: {zscore:.2f}, spread: {spread:.2f}, jam_mid: {mid_price:.2f}, position: {position}")
-
-        if zscore > self.threshold:
-            vol = min(order_depth.buy_orders.get(best_bid, 0), self.limit - position - self.buffer)
-            if vol > 0:
-                self.sell(best_bid, vol)
-        elif zscore < -self.threshold:
-            vol = min(-order_depth.sell_orders.get(best_ask, 0), self.limit + position - self.buffer)
-            if vol > 0:
-                self.buy(best_ask, vol)
+       
 
         return self.orders
 
@@ -393,8 +323,8 @@ class CroissantStrategy(Strategy):
 class JamStrategy(Strategy):
     def __init__(self, symbol: str, limit: int):
         super().__init__(symbol, limit)
-        self.window = deque(maxlen=40)
-        self.threshold = 2
+        self.window = deque(maxlen=30)
+        self.threshold = 1.5
         self.buffer = 10
 
     def act(self, state: TradingState) -> list[Order]:
@@ -431,70 +361,8 @@ class JamStrategy(Strategy):
         if not mismatch_same_dir:
             return []
 
+
         spread = ((synth_jam_1 + synth_jam_2) / 2) - mid_price
-        self.window.append(spread)
-
-        if len(self.window) < self.window.maxlen:
-            return []
-
-        mean = statistics.mean(self.window)
-        stdev = statistics.stdev(self.window)
-        if stdev == 0:
-            return []
-
-        zscore = (spread - mean) / stdev
-        print(f"[JAMS] Z-score: {zscore:.2f}, spread: {spread:.2f}, jam_mid: {mid_price:.2f}, position: {position}")
-
-        if zscore > self.threshold:
-            vol = min(order_depth.buy_orders.get(best_bid, 0), self.limit - position - self.buffer)
-            if vol > 0:
-                self.sell(mid_price, vol)
-        elif zscore < -self.threshold:
-            vol = min(-order_depth.sell_orders.get(best_ask, 0), self.limit + position - self.buffer)
-            if vol > 0:
-                self.buy(mid_price, vol)
-
-        return self.orders
-
-
-
-# ---------- Component Strategy for DJEMBES ----------
-class DjembeStrategy(Strategy):
-    def __init__(self, symbol: str, limit: int):
-        super().__init__(symbol, limit)
-        self.window = deque(maxlen=40)
-        self.threshold = 2
-        self.buffer = 10
-
-    def act(self, state: TradingState) -> list[Order]:
-        order_depth = state.order_depths[self.symbol]
-        position = state.position.get(self.symbol, 0)
-
-        if not order_depth.buy_orders or not order_depth.sell_orders:
-            return []
-
-        best_bid = max(order_depth.buy_orders)
-        best_ask = min(order_depth.sell_orders)
-        mid_price = (best_bid + best_ask) / 2
-
-        def mid(sym):
-            d = state.order_depths.get(sym, None)
-            if not d or not d.buy_orders or not d.sell_orders:
-                return None
-            return (max(d.buy_orders) + min(d.sell_orders)) / 2
-
-        b1 = mid("PICNIC_BASKET1")
-        b2 = mid("PICNIC_BASKET2")
-        c = mid("CROISSANTS")
-        j = mid("JAMS")
-
-        if None in [b1, b2, c, j]:
-            return []
-
-        synth_dj = (b1 - 6 * c - 4*j)
-
-
-        spread = synth_dj - mid_price
         self.window.append(spread)
 
         if len(self.window) < self.window.maxlen:
@@ -520,36 +388,49 @@ class DjembeStrategy(Strategy):
 
 
 
+# ---------- Component Strategy for DJEMBES ----------
+class DjembeStrategy(Strategy):
+    def __init__(self, symbol: str, limit: int):
+        super().__init__(symbol, limit)
+
+    def act(self, state: TradingState) -> list[Order]:
+
+        return self.orders
+
+
+
+
+
+
 
 
 #main 
 class Trader:
     
     def __init__(self) -> None:
-    
-      # rr is stable while kelp is volatile
+
       self.limits = { 
-          #"RAINFOREST_RESIN" : 50,
-          #"KELP" : 50,  
-          #"SQUID_INK" : 50,
-          #"CROISSANTS" : 250,
+          "RAINFOREST_RESIN" : 50,
+          "KELP" : 50,  
+          "SQUID_INK" : 50,
+          "CROISSANTS" : 250,
           "JAMS" : 350,
-          #"DJEMBES" : 60,
-          #"PICNIC_BASKET1" : 60,
-          #"PICNIC_BASKET2" : 100,
+          "DJEMBES" : 60,
+          "PICNIC_BASKET1" : 60,
+          "PICNIC_BASKET2" : 100,
       }
 
 
 
       strategy_classes = {
-          #"RAINFOREST_RESIN" : ResinStrategy,
-          #"KELP" : KelpStrategy,
-          #"SQUID_INK" : KelpStrategy,
-          #"CROISSANTS" : CroissantStrategy,
+          "RAINFOREST_RESIN" : ResinStrategy,
+          "KELP" : KelpStrategy,
+          "SQUID_INK" : SquidInkStrategy,
+          "CROISSANTS" : CroissantStrategy,
           "JAMS" : JamStrategy,
-          #"DJEMBES" : DjembeStrategy,
-          #"PICNIC_BASKET1" : BasketStrategy,
-          #"PICNIC_BASKET2" : BasketStrategy,
+          "DJEMBES" : DjembeStrategy,
+          "PICNIC_BASKET1" : BasketStrategy,
+          "PICNIC_BASKET2" : BasketStrategy,
     
       }
 
