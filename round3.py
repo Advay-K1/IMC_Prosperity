@@ -3,6 +3,10 @@ import numpy as np
 import math
 from collections import defaultdict, deque
 import statistics
+from statistics import NormalDist
+from statistics import stdev
+from math import log, sqrt, exp
+from collections import deque
 
 
 
@@ -248,7 +252,7 @@ class BasketStrategy(Strategy):
             "PICNIC_BASKET1": {"CROISSANTS": 6, "JAMS": 3, "DJEMBES": 1},
             "PICNIC_BASKET2": {"CROISSANTS": 4, "JAMS": 2},
         }
-        self.threshold = 50
+        self.threshold = 20
 
     def act(self, state: TradingState) -> list[Order]:
         self.orders = []
@@ -287,12 +291,6 @@ class BasketStrategy(Strategy):
                 self.buy(price, qty)
 
         return self.orders
-
-    def get_mid_price(self, state: TradingState, sym: str):
-        od = state.order_depths.get(sym)
-        if not od or not od.buy_orders or not od.sell_orders:
-            return None
-        return (max(od.buy_orders) + min(od.sell_orders)) / 2
 
 
 
@@ -354,12 +352,12 @@ class JamStrategy(Strategy):
 
         synth_jam_1 = (b1 - 6 * c - d) / 3
         synth_jam_2 = (b2 - 4 * c) / 2
+        spread1 = synth_jam_1 - mid_price
+        spread2 = synth_jam_2 - mid_price
 
-        mismatch_same_dir = ((synth_jam_1 > mid_price and synth_jam_2 > mid_price) or
-                              (synth_jam_1 < mid_price and synth_jam_2 < mid_price))
-
-        if not mismatch_same_dir:
+        if not (spread1 * spread2 > 20):  
             return []
+
 
 
         spread = ((synth_jam_1 + synth_jam_2) / 2) - mid_price
@@ -398,57 +396,113 @@ class DjembeStrategy(Strategy):
         return self.orders
     
 
-class VolcanicStrategy(Strategy):
+
+
+
+class VoucherStrategy(Strategy):
+     def __init__(self, symbol: str, limit: int):
+         super().__init__(symbol, limit)
+         self.rock_history = []
+         self.max_order_size = 10
+         self.max_position = 200
+         self.band_width = 5
+
+
+     def get_strike(self, product: str) -> int:
+         return int(product.split("_")[-1])
+     def get_mid_price(self, state, product: str) -> float | None:
+         od = state.order_depths.get(product)
+         if od and od.buy_orders and od.sell_orders:
+             return (max(od.buy_orders) + min(od.sell_orders)) / 2
+         return None
+     
+     def estimate_volatility(self, prices):
+         if len(prices) < 2:
+             return 0.01
+         log_returns = np.diff(np.log(prices[-30:]))
+         return max(0.01, np.std(log_returns))
+     
+
+     
+     def black_scholes_call(self, S, K, T, r, sigma):
+         if T <= 0 or sigma <= 0:
+             return max(0, S - K)
+         d1 = (math.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * math.sqrt(T))
+         d2 = d1 - sigma * math.sqrt(T)
+         return S * NormalDist().cdf(d1) - K * math.exp(-r * T) * NormalDist().cdf(d2)
+     
+     def act(self, state: TradingState) -> list[Order]:
+         self.orders = []
+
+         if "VOUCHER" not in self.symbol:
+             return []
+         
+         rock_mid = self.get_mid_price(state, "VOLCANIC_ROCK")
+
+         if rock_mid is None:
+             return []
+         
+         self.rock_history.append(rock_mid)
+
+         if len(self.rock_history) < 30:
+             return []
+         
+         smooth_rock = np.mean(self.rock_history[-30:])
+         sigma = self.estimate_volatility(self.rock_history)
+
+         r = 0.0 
+         round = state.timestamp
+         rounds_left = max(1, 8 - round)
+
+         T = rounds_left / 365
+
+         strike = self.get_strike(self.symbol)
+         fair_value = self.black_scholes_call(smooth_rock, strike, T, r, sigma)
+         od = state.order_depths[self.symbol]
+
+         best_bid = max(od.buy_orders.keys(), default=None)
+         best_ask = min(od.sell_orders.keys(), default=None)
+         position = state.position.get(self.symbol, 0)
+
+         # --- BUY if market is undervalued ---
+         if best_ask is not None and best_ask < fair_value - self.band_width:
+             distance = fair_value - best_ask
+             scale = min((distance / self.band_width) ** 1.5, 2)
+             volume = int(scale * self.max_order_size)
+             volume = min(volume, self.max_position - position)
+             if volume > 0:
+                 self.buy(best_ask, volume)
+
+         # --- SELL if market is overvalued ---
+         if best_bid is not None and best_bid > fair_value + self.band_width:
+             distance = best_bid - fair_value
+             scale = min((distance / self.band_width) ** 1.5, 2)
+             volume = int(scale * self.max_order_size)
+             volume = min(volume, self.max_position + position)
+             if volume > 0:
+                 self.sell(best_bid, volume)
+                 
+         return self.orders
+
+
+
+
+
+
+
+class RockStrategy(Strategy):
     def __init__(self, symbol: str, limit: int):
         super().__init__(symbol, limit)
-        self.rock_history = []
-        self.round = 0
-        self.base_premium = 5
-        self.margin = 10
-        self.max_order_size = 20
 
-    def get_strike(self, product: str) -> int:
-        if product.startswith("VOLCANIC_ROCK_VOUCHER_"):
-            return int(product.split("_")[-1])
-       
     def act(self, state: TradingState) -> list[Order]:
-        self.orders = []
-        self.round += 1
-
-        rock_mid = self.get_mid_price(state, "VOLCANIC_ROCK")
-        if rock_mid is None or "VOUCHER" not in self.symbol:
-            return []
-
-        self.rock_history.append(rock_mid)
-        rock_window = self.rock_history[-20:] if len(self.rock_history) >= 20 else self.rock_history
-        smooth_rock = np.mean(rock_window)
-
-        decay = max(0.1, np.exp(-0.4 * self.round))
-        premium = self.base_premium * decay
-
-        strike = self.get_strike(self.symbol)
-        fair_value = max(0, smooth_rock - strike) + premium
-
-        voucher_mid = self.get_mid_price(state, self.symbol)
-        if voucher_mid is None:
-            return []
-
-        od = state.order_depths.get(self.symbol)
-        if not od:
-            return []
-
-        best_ask = min(od.sell_orders.keys(), default=None)
-        if best_ask is not None and best_ask < fair_value - self.margin:
-            qty = min(self.max_order_size, -od.sell_orders[best_ask])
-            self.buy(best_ask, qty)
-
-            
-        best_bid = max(od.buy_orders.keys(), default=None)
-        if best_bid is not None and best_bid > fair_value + self.margin:
-            qty = min(self.max_order_size, od.buy_orders[best_bid])
-            self.sell(best_bid, qty)
 
         return self.orders
+
+
+
+
+
+
 
 
 
@@ -463,14 +517,14 @@ class Trader:
     def __init__(self) -> None:
 
       self.limits = { 
-          #"RAINFOREST_RESIN" : 50,
-          #"KELP" : 50,  
-          #"SQUID_INK" : 50,
-          #"CROISSANTS" : 250,
-          #"JAMS" : 350,
-          #"DJEMBES" : 60,
-          #"PICNIC_BASKET1" : 60,
-          #"PICNIC_BASKET2" : 100,
+          "RAINFOREST_RESIN" : 50,
+          "KELP" : 50,  
+          "SQUID_INK" : 50,
+          "CROISSANTS" : 250,
+          "JAMS" : 350,
+          "DJEMBES" : 60,
+          "PICNIC_BASKET1" : 60,
+          "PICNIC_BASKET2" : 100,
           "VOLCANIC_ROCK" : 400,
           "VOLCANIC_ROCK_VOUCHER_9500" : 200,
           "VOLCANIC_ROCK_VOUCHER_9750" : 200,
@@ -482,20 +536,20 @@ class Trader:
 
 
       strategy_classes = {
-          #"RAINFOREST_RESIN" : ResinStrategy,
-          #"KELP" : KelpStrategy,
-          #"SQUID_INK" : SquidInkStrategy,
-          #"CROISSANTS" : CroissantStrategy,
-          #"JAMS" : JamStrategy,
-          #"DJEMBES" : DjembeStrategy,
-          #"PICNIC_BASKET1" : BasketStrategy,
-          #"PICNIC_BASKET2" : BasketStrategy,
-          "VOLCANIC_ROCK" : VolcanicStrategy,
-          "VOLCANIC_ROCK_VOUCHER_9500" : VolcanicStrategy,
-          "VOLCANIC_ROCK_VOUCHER_9750" : VolcanicStrategy,
-          "VOLCANIC_ROCK_VOUCHER_10000" :VolcanicStrategy,
-          "VOLCANIC_ROCK_VOUCHER_10250" :VolcanicStrategy,
-          "VOLCANIC_ROCK_VOUCHER_10500" :VolcanicStrategy,
+          "RAINFOREST_RESIN" : ResinStrategy,
+          "KELP" : KelpStrategy,
+          "SQUID_INK" : SquidInkStrategy,
+          "CROISSANTS" : CroissantStrategy,
+          "JAMS" : JamStrategy,
+          "DJEMBES" : DjembeStrategy,
+          "PICNIC_BASKET1" : BasketStrategy,
+          "PICNIC_BASKET2" : BasketStrategy,
+          "VOLCANIC_ROCK" : RockStrategy,
+          "VOLCANIC_ROCK_VOUCHER_9500" : VoucherStrategy,
+          "VOLCANIC_ROCK_VOUCHER_9750" : VoucherStrategy,
+          "VOLCANIC_ROCK_VOUCHER_10000" :VoucherStrategy,
+          "VOLCANIC_ROCK_VOUCHER_10250" :VoucherStrategy,
+          "VOLCANIC_ROCK_VOUCHER_10500" :VoucherStrategy,
       }
 
       self.strategies = {
